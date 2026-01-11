@@ -1,6 +1,7 @@
 #include "at_modem.h"
 #include "ml307/ml307_at_modem.h"
 #include "ec801e/ec801e_at_modem.h"
+#include "ym310/ym310_at_modem.h"
 #include <esp_log.h>
 #include <esp_err.h>
 #include <sstream>
@@ -40,6 +41,10 @@ std::unique_ptr<AtModem> AtModem::Detect(gpio_num_t tx_pin, gpio_num_t rx_pin, g
         return std::make_unique<Ec801EAtModem>(uart);
     } else if (response.find("ML307") == 0) {
         return std::make_unique<Ml307AtModem>(uart);
+    } else if (response.find("YM310") != std::string::npos) {
+        // YM310 模组基于移芯 EC716S 平台
+        ESP_LOGI(TAG, "Detected YM310/EC716 series modem");
+        return std::make_unique<Ym310AtModem>(uart);
     } else {
         ESP_LOGE(TAG, "Unrecognized modem type: %s, use ML307 AtModem as default", response.c_str());
         return std::make_unique<Ml307AtModem>(uart);
@@ -149,7 +154,20 @@ std::string AtModem::GetModuleRevision() {
         return module_revision_;
     }
     if (at_uart_->SendCommand("AT+CGMR")) {
-        module_revision_ = at_uart_->GetResponse();
+        std::string response = at_uart_->GetResponse();
+        // 解析版本号，支持多种格式：
+        // 1. YM310: Revision: "YM310.X08CCM_AT.S82_R4.0.1.251117"
+        // 2. ML307: ML307A-DSLN_V5.0.3
+        // 3. EC801E: EC801ECNLCR06A03M16
+        size_t quote_start = response.find('"');
+        size_t quote_end = response.rfind('"');
+        if (quote_start != std::string::npos && quote_end != std::string::npos && quote_end > quote_start) {
+            // 提取引号内的内容
+            module_revision_ = response.substr(quote_start + 1, quote_end - quote_start - 1);
+        } else {
+            // 没有引号，直接使用原始响应
+            module_revision_ = response;
+        }
     } else {
         ESP_LOGE(TAG, "Failed to send AT+CGMR command");
     }

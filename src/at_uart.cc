@@ -197,8 +197,23 @@ static bool is_number(const std::string& s) {
 }
 
 bool AtUart::ParseResponse() {
+    // 处理数据发送提示符 '>'
     if (wait_for_response_ && rx_buffer_[0] == '>') {
         rx_buffer_.erase(0, 1);
+        xEventGroupSetBits(event_group_handle_, AT_EVENT_COMMAND_DONE);
+        return true;
+    }
+    
+    // 处理 YM310 HTTP 数据发送提示符 'DOWNLOAD'
+    if (wait_for_response_ && rx_buffer_.size() >= 10 && 
+        rx_buffer_.substr(0, 8) == "DOWNLOAD") {
+        // 跳过 DOWNLOAD 和可能的换行符
+        size_t skip = 8;
+        while (skip < rx_buffer_.size() && 
+               (rx_buffer_[skip] == '\r' || rx_buffer_[skip] == '\n')) {
+            skip++;
+        }
+        rx_buffer_.erase(0, skip);
         xEventGroupSetBits(event_group_handle_, AT_EVENT_COMMAND_DONE);
         return true;
     }
@@ -240,6 +255,134 @@ bool AtUart::ParseResponse() {
     // Parse "+CME ERROR: 123,456,789"
     if (rx_buffer_[0] == '+') {
         std::string command, values;
+        
+        // 特殊处理 YM310 的 +RECEIVE,<n>,<length>: 格式
+        // 格式: +RECEIVE,<n>,<length>:\r\n<data>\r\n
+        if (rx_buffer_.size() >= 9 && rx_buffer_.substr(0, 9) == "+RECEIVE,") {
+            // 查找冒号位置
+            auto colon_pos = rx_buffer_.find(':');
+            if (colon_pos != std::string::npos && colon_pos < end_pos) {
+                // 解析 +RECEIVE,<n>,<length>
+                std::string receive_params = rx_buffer_.substr(9, colon_pos - 9);
+                std::vector<AtArgumentValue> arguments;
+                
+                // 解析参数 (n,length)
+                std::istringstream iss(receive_params);
+                std::string item;
+                int param_idx = 0;
+                int data_length = 0;
+                while (std::getline(iss, item, ',')) {
+                    AtArgumentValue arg;
+                    arg.type = AtArgumentValue::Type::Int;
+                    arg.int_value = std::stoi(item);
+                    arg.string_value = item;
+                    arguments.push_back(arg);
+                    if (param_idx == 1) {
+                        data_length = arg.int_value;
+                    }
+                    param_idx++;
+                }
+                
+                // 删除 +RECEIVE,<n>,<length>:\r\n 部分
+                rx_buffer_.erase(0, end_pos + 2);
+                
+                // 等待数据到达（数据在下一行）
+                if (data_length > 0) {
+                    // 检查是否有足够的数据
+                    if (rx_buffer_.size() >= (size_t)data_length) {
+                        // 读取数据
+                        std::string data = rx_buffer_.substr(0, data_length);
+                        rx_buffer_.erase(0, data_length);
+                        
+                        // 跳过可能的 \r\n
+                        while (rx_buffer_.size() >= 1 && 
+                               (rx_buffer_[0] == '\r' || rx_buffer_[0] == '\n')) {
+                            rx_buffer_.erase(0, 1);
+                        }
+                        
+                        // 添加数据到参数
+                        AtArgumentValue data_arg;
+                        data_arg.type = AtArgumentValue::Type::String;
+                        data_arg.string_value = data;
+                        arguments.push_back(data_arg);
+                        
+                        ESP_LOGD(TAG, "RECEIVE: conn=%d, len=%d", 
+                                 arguments[0].int_value, data_length);
+                    } else {
+                        // 数据不完整，需要等待更多数据
+                        // 把 +RECEIVE 行放回去
+                        std::string receive_line = "+RECEIVE," + receive_params + ":\r\n";
+                        rx_buffer_.insert(0, receive_line);
+                        return false;
+                    }
+                }
+                
+                HandleUrc("RECEIVE", arguments);
+                return true;
+            }
+        }
+        
+        // 特殊处理 YM310 MQTT 订阅消息: +MSUB:"topic",<len> byte,<data>
+        // 格式: +MSUB:"server-device",156 byte,{"type":"hello",...}
+        if (rx_buffer_.size() >= 6 && rx_buffer_.substr(0, 6) == "+MSUB:") {
+            // 找到 " byte," 标记
+            auto byte_marker = rx_buffer_.find(" byte,");
+            if (byte_marker != std::string::npos) {
+                // 解析长度：找到 " byte," 前面的数字
+                size_t len_start = rx_buffer_.rfind(',', byte_marker);
+                if (len_start != std::string::npos) {
+                    std::string len_str = rx_buffer_.substr(len_start + 1, byte_marker - len_start - 1);
+                    int data_length = std::stoi(len_str);
+                    
+                    // 数据起始位置
+                    size_t data_start = byte_marker + 6;  // " byte," 长度为 6
+                    
+                    // 检查数据是否完整
+                    if (rx_buffer_.size() >= data_start + data_length) {
+                        // 解析 topic
+                        size_t topic_start = rx_buffer_.find('"') + 1;
+                        size_t topic_end = rx_buffer_.find('"', topic_start);
+                        std::string topic = rx_buffer_.substr(topic_start, topic_end - topic_start);
+                        
+                        // 提取数据
+                        std::string data = rx_buffer_.substr(data_start, data_length);
+                        
+                        // 构建参数
+                        std::vector<AtArgumentValue> arguments;
+                        AtArgumentValue topic_arg;
+                        topic_arg.type = AtArgumentValue::Type::String;
+                        topic_arg.string_value = topic;
+                        arguments.push_back(topic_arg);
+                        
+                        AtArgumentValue len_arg;
+                        len_arg.type = AtArgumentValue::Type::Int;
+                        len_arg.int_value = data_length;
+                        len_arg.string_value = len_str;
+                        arguments.push_back(len_arg);
+                        
+                        AtArgumentValue data_arg;
+                        data_arg.type = AtArgumentValue::Type::String;
+                        data_arg.string_value = data;
+                        arguments.push_back(data_arg);
+                        
+                        // 删除已处理的数据
+                        size_t total_len = data_start + data_length;
+                        while (rx_buffer_.size() > total_len && 
+                               (rx_buffer_[total_len] == '\r' || rx_buffer_[total_len] == '\n')) {
+                            total_len++;
+                        }
+                        rx_buffer_.erase(0, total_len);
+                        
+                        ESP_LOGD(TAG, "MSUB: topic=%s, len=%d", topic.c_str(), data_length);
+                        HandleUrc("MSUB", arguments);
+                        return true;
+                    }
+                }
+            }
+            // 数据不完整，等待更多数据
+            return false;
+        }
+        
         auto pos = rx_buffer_.find(": ");
         if (pos == std::string::npos || pos > end_pos) {
             command = rx_buffer_.substr(1, end_pos - 1);
@@ -286,6 +429,60 @@ bool AtUart::ParseResponse() {
         rx_buffer_.erase(0, end_pos + 2);
         return true;
     } else {
+        // 检查是否是 YM310 多连接模式的 URC 格式: "n,COMMAND" 或 "COMMAND"
+        // 例如: "7,CONNECT OK", "CONNECTOK", "7,CLOSED", "CONNACKOK"
+        std::string line = rx_buffer_.substr(0, end_pos);
+        std::string urc_command;
+        std::vector<AtArgumentValue> urc_args;
+        
+        // 尝试解析多连接格式 "n,COMMAND" 
+        if (line.size() >= 3 && std::isdigit(line[0]) && line[1] == ',') {
+            // 提取连接 ID
+            AtArgumentValue conn_id_arg;
+            conn_id_arg.type = AtArgumentValue::Type::Int;
+            conn_id_arg.int_value = line[0] - '0';
+            urc_args.push_back(conn_id_arg);
+            
+            // 命令部分（包含连接 ID 前缀，方便匹配）
+            urc_command = line;
+        } else {
+            urc_command = line;
+        }
+        
+        // 检查是否是已知的 URC 格式
+        bool is_urc = false;
+        if (urc_command.find("CONNECT OK") != std::string::npos ||
+            urc_command.find("CONNECTOK") != std::string::npos ||
+            urc_command.find("CONNECT FAIL") != std::string::npos ||
+            urc_command.find("CONNECTFAIL") != std::string::npos ||
+            urc_command.find("CONNACK OK") != std::string::npos ||
+            urc_command.find("CONNACKOK") != std::string::npos ||
+            urc_command.find("CLOSED") != std::string::npos ||
+            urc_command.find("SEND OK") != std::string::npos ||
+            urc_command.find("SENDOK") != std::string::npos ||
+            urc_command.find("ALREADY CONNECT") != std::string::npos ||
+            urc_command.find("ALREADYCONNECT") != std::string::npos ||
+            urc_command.find("SUBACK") != std::string::npos ||
+            urc_command.find("PUBACK") != std::string::npos ||
+            urc_command.find("PUBCOMP") != std::string::npos ||
+            urc_command.find("DATA ACCEPT") != std::string::npos ||
+            urc_command.find("DATAACCEPT") != std::string::npos) {
+            is_urc = true;
+        }
+        
+        if (is_urc) {
+            rx_buffer_.erase(0, end_pos + 2);
+            
+            // DATA ACCEPT 在快发模式下代替 OK，需要触发命令完成事件
+            if (urc_command.find("DATA ACCEPT") != std::string::npos ||
+                urc_command.find("DATAACCEPT") != std::string::npos) {
+                xEventGroupSetBits(event_group_handle_, AT_EVENT_COMMAND_DONE);
+            }
+            
+            HandleUrc(urc_command, urc_args);
+            return true;
+        }
+        
         std::lock_guard<std::mutex> lock(mutex_);
         response_ = rx_buffer_.substr(0, end_pos);
         rx_buffer_.erase(0, end_pos + 2);
