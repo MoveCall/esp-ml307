@@ -13,6 +13,12 @@ idf_component_register(
         "src/ml307/ml307_mqtt.cc"
         "src/ml307/ml307_udp.cc"
         "src/ml307/ml307_http.cc"
+        "src/ym310/ym310_at_modem.cc"
+        "src/ym310/ym310_tcp.cc"
+        "src/ym310/ym310_ssl.cc"
+        "src/ym310/ym310_udp.cc"
+        "src/ym310/ym310_http.cc"
+        "src/ym310/ym310_mqtt.cc"
         "src/esp/esp_network.cc"
         "src/esp/esp_ssl.cc"
         "src/esp/esp_tcp.cc"
@@ -24,6 +30,7 @@ idf_component_register(
         "include"
     PRIV_INCLUDE_DIRS
         "."
+        "src/ym310"
     REQUIRES
         "esp_driver_gpio"
         "esp_driver_uart"

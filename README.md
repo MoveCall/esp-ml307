@@ -1,6 +1,6 @@
 # ML307 / Quectel-E Series Cat.1 AT Modem (v3.0)
 
-这是一个适用于 ML307R / EC801E / NT26K LTE Cat.1 模组的组件。
+这是一个适用于 ML307R / EC801E / NT26K / YM310 LTE Cat.1 模组的组件。
 本项目最初为 https://github.com/78/xiaozhi-esp32 项目创建。
 
 出现 UART_FIFO_OVF 需要设置 CONFIG_UART_ISR_IN_IRAM=y，其他 IO 如 LVGL 放在 CPU1
@@ -39,6 +39,7 @@
 - ML307A
 - EC801E \*
 - NT26K \*
+- YM310 \*
 
 \* 需要在购买时咨询是否已烧录支持 SSL TCP 的固件
 
@@ -415,6 +416,13 @@ http->Open("GET", "https://example.com");
 5. `GetAtUart()` 返回 `shared_ptr<AtUart>`，支持安全共享
 6. 如果需要提前释放网络对象，可以调用 `.reset()` 方法
 7. 所有网络接口方法现在都有默认参数 `connect_id = -1`
+
+### YM310 特别说明
+
+1. **HTTP 大文件下载**: YM310 的 HTTP 引擎有内存限制，GET 请求自动使用 TCP 直连下载
+2. **MQTT SSL**: 端口 8883 时自动启用 SSL
+3. **PDP/SAPBR 承载**: TCP/UDP 使用 PDP 上下文，HTTP 使用 SAPBR 承载
+4. **模组复位**: 如果遇到连接问题，可能需要手动复位 4G 模组
 
 ## 作者
 
